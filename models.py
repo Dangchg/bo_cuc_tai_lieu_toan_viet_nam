@@ -2,7 +2,6 @@ import cv2
 from PIL import Image
 import numpy as np
 from paddleocr import PPStructureV3
-#from modelmoi import ocrer
 from paddleocr import PaddleOCRVL
 import os
 os.environ["FLAGS_fraction_of_gpu_memory_to_use"] = "0.9" #tăng lên 1 nếu Vram của gpu lớn 
