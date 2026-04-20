@@ -352,16 +352,13 @@ def enhance_math_for_pix2tex(img, scale_factor=2.0, pad_size=15):
 def resolve_inline_math(raw_regions):
     """
     Tìm công thức nằm trong dòng, chẻ nhỏ box text và chống lặp công thức.
-    ĐÃ TỐI ƯU: Thêm chốt chặn trục X và chống lẹm khung.
+    ĐÃ TỐI ƯU V2: Bảo vệ dấu câu và không làm mất thuộc tính (score, is_rescued).
     """
     final_regions = []
     
-    # Gộp chung các nhãn text
     text_labels = ['text_line', 'doc_title', 'paragraph_title']
     text_lines = [b for b in raw_regions if b['label'] in text_labels]
     formulas = [b for b in raw_regions if b['label'] in ['formula', 'texformula']]
-    
-    # Giữ nguyên các box không phải text hay math
     other_regions = [b for b in raw_regions if b['label'] not in text_labels + ['formula', 'texformula']]
 
     used_formulas = set()
@@ -379,10 +376,6 @@ def resolve_inline_math(raw_regions):
             f_height = fy2 - fy1
             overlap_y = min(ly2, fy2) - max(ly1, fy1)
             
-            # --- TỐI ƯU Ở ĐÂY ---
-            # 1. Đủ độ giao cắt Y (> 40% chiều cao chữ)
-            # 2. Không quá cao (< 2.5 lần chiều cao chữ)
-            # 3. CHỐT CHẶN TRỤC X: Tọa độ công thức phải nằm xen vào giữa dòng chữ
             if overlap_y > (line_height * 0.4) and f_height < (line_height * 2.5):
                 if fx1 < lx2 and fx2 > lx1: 
                     inline_math_in_this_line.append((i, f))
@@ -393,28 +386,30 @@ def resolve_inline_math(raw_regions):
         else:
             inline_math_in_this_line.sort(key=lambda item: item[1]['box'][0])
             current_x = lx1
-            MIN_TEXT_CHUNK_WIDTH = 8
+            
+
+            MIN_TEXT_CHUNK_WIDTH = 10 
 
             for idx, math_box in inline_math_in_this_line:
                 fx1, fy1, fx2, fy2 = math_box['box']
-                
-                # --- TỐI ƯU Ở ĐÂY: Dùng min(fx1, lx2) để chữ bên trái không đâm xuyên qua lề phải ---
                 chunk_right = min(fx1, lx2)
                 
                 if current_x < chunk_right and (chunk_right - current_x) > MIN_TEXT_CHUNK_WIDTH:
-                    final_regions.append({
-                        'label': line.get('label', 'text_line'),
-                        'box': [current_x, ly1, chunk_right, ly2]
-                    })
+                    # TỐI ƯU : Dùng .copy() để không làm mất cờ is_rescued, score...
+                    left_chunk = line.copy()
+                    left_chunk['box'] = [current_x, ly1, chunk_right, ly2]
+                    final_regions.append(left_chunk)
                 
                 final_regions.append(math_box)
-                current_x = max(current_x, fx2 + 2)
+                
+
+                current_x = max(current_x, fx2)
                 
             if current_x < lx2 and (lx2 - current_x) > MIN_TEXT_CHUNK_WIDTH:
-                final_regions.append({
-                    'label': line.get('label', 'text_line'),
-                    'box': [current_x, ly1, lx2, ly2]
-                })
+                # TỐI ƯU 2: Dùng .copy()
+                right_chunk = line.copy()
+                right_chunk['box'] = [current_x, ly1, lx2, ly2]
+                final_regions.append(right_chunk)
 
     for i, f in enumerate(formulas):
         if i not in used_formulas:
@@ -437,47 +432,57 @@ def calculate_intersection_area(box1, box2):
 
     return (x_right - x_left) * (y_bottom - y_top)
 
-def remove_overlapping_text_lines(regions, overlap_threshold=0.5):
+def remove_overlapping_text_lines(regions, overlap_threshold):
     """
-    Lọc bỏ mọi dòng chữ (text_line, doc_title, paragraph_title) đè lên ảnh/công thức.
-    ĐÃ TỐI ƯU: Xử lý triệt để tất cả các nhãn văn bản.
+    Bộ lọc kép V2: Bảo vệ tuyệt đối các box chữ lớn bao trùm công thức.
     """
-    priority_labels = ['image','chart', 'figure', 'formula', 'texformula']
-    priority_boxes = [r['box'] for r in regions if r['label'] in priority_labels]
-    
-    # --- TỐI ƯU Ở ĐÂY: Quét mọi nhãn chữ ---
+    filtered_regions = []
     text_labels = ['text_line', 'doc_title', 'paragraph_title']
     
-    filtered_regions = []
+    images_and_charts = [r['box'] for r in regions if r['label'] in ['image', 'figure', 'chart']]
+    formulas = [r['box'] for r in regions if r['label'] in ['formula', 'texformula']]
     
     for item in regions:
-        if item.get('is_rescued', False):
-            filtered_regions.append(item)
-            continue
-        # Nếu là nhãn ưu tiên hoặc nhãn bảng biểu, auto giữ lại
         if item['label'] not in text_labels:
             filtered_regions.append(item)
             continue
             
-        # Nếu là nhãn text, tiến hành xét duyệt IoA
-        t_box = item['box']
-        t_area = (t_box[2] - t_box[0]) * (t_box[3] - t_box[1])
-        
-        if t_area <= 0: 
-            continue
-
-        should_keep = True
-        for p_box in priority_boxes:
-            inter_area = calculate_intersection_area(t_box, p_box)
-            
-            # Nếu phần chữ bị chìm trong ảnh/công thức vượt ngưỡng -> Khai tử
-            if (inter_area / t_area) > overlap_threshold:
-                should_keep = False
-                break 
-
-        if should_keep:
+        if item.get('is_rescued', False):
             filtered_regions.append(item)
-
+            continue
+            
+        is_trash = False
+        
+        # 1. Lọc Ảnh/Biểu đồ (Ngưỡng 60%)
+        for p_box in images_and_charts:
+            if calculate_ioa(item['box'], p_box) > overlap_threshold:
+                is_trash = True
+                break
+                
+        # 2. Lọc Công Thức (Kết hợp kiểm tra diện tích bao trùm)
+        if not is_trash:
+            # Tính diện tích của box Text
+            tx1, ty1, tx2, ty2 = item['box']
+            text_area = (tx2 - tx1) * (ty2 - ty1)
+            
+            for f_box in formulas:
+                ioa = calculate_ioa(item['box'], f_box)
+                
+                # Nếu text nằm chìm trong công thức > 60%
+                if ioa > 0.60:
+                    # Tính diện tích của box Công thức
+                    fx1, fy1, fx2, fy2 = f_box
+                    f_area = (fx2 - fx1) * (fy2 - fy1)
+                    
+                    # CHỐT CHẶN: 
+                    # Nếu box text to hơn bỏ qua
+                    if text_area < f_area :
+                        is_trash = True
+                        break
+                    
+        if not is_trash:
+            filtered_regions.append(item)
+            
     return filtered_regions
 
 # Hàm helper của bạn rất chuẩn, mình giữ nguyên:
@@ -493,39 +498,33 @@ def calculate_intersection_area(box1, box2):
 
     return (x_right - x_left) * (y_bottom - y_top)
 
-def remove_watermark(img):
+def remove_watermark(img_cv2, threshold_value=210):
     """
-    Xóa watermark bằng kỹ thuật Cắt sáng (Intensity Truncation).
-    Chuyên trị các watermark chữ to, bóng mờ chìm dưới nền giấy.
+    Xóa watermark mờ nhưng "vỗ béo" để bảo vệ nét vẽ hình học mỏng manh.
     """
-    if img is None or img.size == 0:
-        return np.ones((5, 5, 3), dtype=np.uint8) * 255
+    # 1. Chuyển sang ảnh xám
+    gray = cv2.cvtColor(img_cv2, cv2.COLOR_BGR2GRAY)
+    
+    # =========================================================
+    # BƯỚC QUAN TRỌNG: VỖ BÉO NÉT MẢNH TRƯỚC KHI XÓA
+    # =========================================================
+    # Dùng cv2.erode (Xói mòn phần trắng, làm nở phần đen)
+    # Nét mỏng 1 pixel màu xám mờ sẽ được nong ra thành 2-3 pixel và ĐEN KỊT lại.
+    kernel = np.ones((2, 2), np.uint8) 
+    thickened = cv2.erode(gray, kernel, iterations=1)
+    
+    # 2. Xóa watermark bằng ngưỡng (Threshold)
+    # Lúc này nét vẽ đã đen thui, bạn có thể tự tin cắt ngưỡng cao (210-220)
+    # để chém bay watermark nhạt màu mà không sợ đứt rách nét vẽ.
+    _, binary = cv2.threshold(thickened, threshold_value, 255, cv2.THRESH_BINARY)
+    
+    # 3. (Tùy chọn) Làm mượt lại mép chữ và mép hình vẽ sau khi vỗ béo
+    binary = cv2.medianBlur(binary, 3) 
+    
+    # 4. Chuyển lại thành ảnh 3 kênh màu để đưa vào mô hình PPStructure
+    return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
 
-    try:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        # 1. CHÉM BẰNG (TRUNCATE)
-        # Bất kỳ pixel nào sáng hơn 180 (watermark nhạt và nền trắng) đều bị ép về 180.
-        # Nét chữ thật (màu đen, pixel < 100) được giữ nguyên.
-        # MẸO: Nếu watermark đậm hơn một chút, bạn có thể hạ số 180 xuống 160 hoặc 150.
-        _, trunc = cv2.threshold(gray, 180, 255, cv2.THRESH_TRUNC)
-
-        # 2. KÉO DÃN (NORMALIZE)
-        # Kéo dải màu hiện tại: ép màu xám (180) thành trắng tinh (255), nét đen vẫn đen.
-        normalized = cv2.normalize(trunc, None, 0, 255, cv2.NORM_MINMAX)
-
-        # 3. Phân ngưỡng Otsu để lấy nét mực dứt khoát
-        _, binary = cv2.threshold(normalized, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
-
-        # 4. Áp mask xóa nền
-        result = img.copy()
-        result[binary == 255] = [255, 255, 255]
-
-        return result
-
-    except Exception as e:
-        print(f"[Cảnh báo] Lỗi thuật toán xóa watermark: {e}")
-        return img
 def is_valid_image_content(img_crop):
     """
     Kiểm tra xem ảnh crop có chứa nội dung thật không, hay chỉ là rác/bóng mờ/đường kẻ.
@@ -773,11 +772,10 @@ def merge_adjacent_text_lines(regions, max_gap_multiplier=2.5):
                 else:
                     break
 
-        merged_texts.append({
-            'label': current['label'],
-            'box': [cx1, cy1, cx2, cy2],
-            'score': current.get('score', 1.0)
-        })
+        merged_item = current.copy()
+        merged_item['box'] = [cx1, cy1, cx2, cy2]
+        
+        merged_texts.append(merged_item)
 
     # Ghép các text đã gom với các đối tượng được bảo vệ (Bảng, chữ trong bảng, công thức, ảnh)
     return merged_texts + protected_regions
