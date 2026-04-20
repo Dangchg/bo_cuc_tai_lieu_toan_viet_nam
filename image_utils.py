@@ -393,7 +393,7 @@ def resolve_inline_math(raw_regions):
         else:
             inline_math_in_this_line.sort(key=lambda item: item[1]['box'][0])
             current_x = lx1
-            MIN_TEXT_CHUNK_WIDTH = 20 
+            MIN_TEXT_CHUNK_WIDTH = 8
 
             for idx, math_box in inline_math_in_this_line:
                 fx1, fy1, fx2, fy2 = math_box['box']
@@ -442,7 +442,7 @@ def remove_overlapping_text_lines(regions, overlap_threshold=0.5):
     Lọc bỏ mọi dòng chữ (text_line, doc_title, paragraph_title) đè lên ảnh/công thức.
     ĐÃ TỐI ƯU: Xử lý triệt để tất cả các nhãn văn bản.
     """
-    priority_labels = ['image', 'figure', 'formula', 'texformula']
+    priority_labels = ['image','chart', 'figure', 'formula', 'texformula']
     priority_boxes = [r['box'] for r in regions if r['label'] in priority_labels]
     
     # --- TỐI ƯU Ở ĐÂY: Quét mọi nhãn chữ ---
@@ -451,6 +451,9 @@ def remove_overlapping_text_lines(regions, overlap_threshold=0.5):
     filtered_regions = []
     
     for item in regions:
+        if item.get('is_rescued', False):
+            filtered_regions.append(item)
+            continue
         # Nếu là nhãn ưu tiên hoặc nhãn bảng biểu, auto giữ lại
         if item['label'] not in text_labels:
             filtered_regions.append(item)
@@ -607,3 +610,174 @@ def nms_text_lines_by_score(regions, overlap_threshold=0.5):
 
     # 3. Trả về danh sách text đã lọc sạch sẽ + các vùng khác (bảng, ảnh, toán)
     return keep_regions + other_regions
+
+
+def rescue_missing_text(img_cv2, regions, page_index=1):
+    """
+    Hàm cứu hộ siêu chính xác: Bọc sát nét mực và xuất ảnh Debug để chẩn đoán.
+    """
+    h_img, w_img = img_cv2.shape[:2]
+    formulas = [r for r in regions if r['label'] in ['formula', 'texformula']]
+    existing_boxes = [r['box'] for r in regions]
+    new_regions = []
+    
+    # TẠO THƯ MỤC DEBUG
+    debug_dir = f"debug_results/rescue_p{page_index}"
+    os.makedirs(debug_dir, exist_ok=True)
+
+    def is_empty(box):
+        tx1, ty1, tx2, ty2 = box
+        tarea = (tx2 - tx1) * (ty2 - ty1)
+        if tarea <= 0: return False
+        for ex1, ey1, ex2, ey2 in existing_boxes:
+            ix = max(0, min(tx2, ex2) - max(tx1, ex1))
+            iy = max(0, min(ty2, ey2) - max(ty1, ey1))
+            if (ix * iy) / tarea > 0.05: return False # Đè 5% là coi như đã có chủ
+        return True
+
+    for i, f in enumerate(formulas):
+        fx1, fy1, fx2, fy2 = f['box']
+        
+        # Mở rộng Y để chắc chắn bắt được chữ cao/thấp hơn công thức
+        search_y1 = max(0, fy1 - 10)
+        search_y2 = min(h_img, fy2 + 10)
+
+        # ==========================================
+        # 1. QUÉT BÊN TRÁI (Tìm chữ như "Bài 1:")
+        # ==========================================
+        if fx1 > 20: 
+            crop_left = img_cv2[search_y1:search_y2, 0:fx1]
+            gray = cv2.cvtColor(crop_left, cv2.COLOR_BGR2GRAY)
+            _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+            binary = cv2.medianBlur(binary, 3) # Xóa bụi mịn
+            coords = cv2.findNonZero(binary)
+            
+            if coords is not None:
+                x, y, w, h = cv2.boundingRect(coords)
+                # Chốt chặn: Kích thước nét mực phải đủ to
+                if w > 10 and h > 10: 
+                    abs_box = [x, search_y1 + y, x + w, search_y1 + y + h]
+                    if is_empty(abs_box):
+                        new_regions.append({'label': 'text_line', 'box': abs_box, 'score': 0.99,'is_rescued': True})
+                        existing_boxes.append(abs_box)
+                        cv2.imwrite(os.path.join(debug_dir, f"form_{i}_left_RESCUED.jpg"), crop_left[y:y+h, x:x+w])
+                    else:
+                        cv2.imwrite(os.path.join(debug_dir, f"form_{i}_left_IGNORED_OVERLAP.jpg"), crop_left[y:y+h, x:x+w])
+
+        # ==========================================
+        # 2. QUÉT BÊN PHẢI (Tìm chữ như "(cm)")
+        # ==========================================
+        if w_img - fx2 > 20:
+            crop_right = img_cv2[search_y1:search_y2, fx2:w_img]
+            gray = cv2.cvtColor(crop_right, cv2.COLOR_BGR2GRAY)
+            _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+            binary = cv2.medianBlur(binary, 3)
+            coords = cv2.findNonZero(binary)
+            
+            if coords is not None:
+                x, y, w, h = cv2.boundingRect(coords)
+                if w > 10 and h > 10:
+                    abs_box = [fx2 + x, search_y1 + y, fx2 + x + w, search_y1 + y + h]
+                    if is_empty(abs_box):
+                        new_regions.append({'label': 'text_line', 'box': abs_box, 'score': 0.99})
+                        existing_boxes.append(abs_box)
+                        cv2.imwrite(os.path.join(debug_dir, f"form_{i}_right_RESCUED.jpg"), crop_right[y:y+h, x:x+w])
+                    else:
+                        cv2.imwrite(os.path.join(debug_dir, f"form_{i}_right_IGNORED_OVERLAP.jpg"), crop_right[y:y+h, x:x+w])
+
+    return regions + new_regions
+
+from table_handler import calculate_ioa
+
+def merge_adjacent_text_lines(regions, max_gap_multiplier=2.5):
+    """
+    Gom các text_line sát nhau, nhưng TUYỆT ĐỐI BỎ QUA các text nằm trong Bảng.
+    """
+    text_labels = ['text_line', 'doc_title', 'paragraph_title']
+    tables = [r for r in regions if r['label'] == 'table']
+    
+    texts_to_merge = []
+    protected_regions = [] # Chứa non-text và các text nằm trong bảng
+    
+    # 1. PHÂN LOẠI: Ai được gom, ai được bảo vệ?
+    for r in regions:
+        if r['label'] not in text_labels:
+            protected_regions.append(r)
+            continue
+            
+        # Kiểm tra xem chữ này có nằm trong bảng không (IoA > 50%)
+        in_table = False
+        for t in tables:
+            # Lưu ý: Cần chắc chắn bạn đã có hàm calculate_ioa trong file này
+            if calculate_ioa(r['box'], t['box']) > 0.5:
+                in_table = True
+                break
+                
+        if in_table:
+            protected_regions.append(r) # Cất vào vùng an toàn
+        else:
+            texts_to_merge.append(r)    # Đem đi gom
+            
+    if not texts_to_merge:
+        return regions
+
+    # 2. Sắp xếp các text tự do
+    texts_to_merge.sort(key=lambda r: (((r['box'][1] + r['box'][3]) / 2) // 15, r['box'][0]))
+
+    merged_texts = []
+    skip_indices = set()
+
+    # 3. TIẾN HÀNH GOM CỤM
+    for i in range(len(texts_to_merge)):
+        if i in skip_indices:
+            continue
+
+        current = texts_to_merge[i]
+        cx1, cy1, cx2, cy2 = current['box']
+
+        for j in range(i + 1, len(texts_to_merge)):
+            if j in skip_indices:
+                continue
+
+            nxt = texts_to_merge[j]
+            nx1, ny1, nx2, ny2 = nxt['box']
+
+            min_h = min(cy2 - cy1, ny2 - ny1)
+            overlap_y = min(cy2, ny2) - max(cy1, ny1)
+
+            if min_h > 0 and (overlap_y / min_h) > 0.5:
+                gap = nx1 - cx2
+                allowed_gap = max(50, (cy2 - cy1) * max_gap_multiplier)
+
+                if gap < allowed_gap:
+                    # 4. CHỐT CHẶN: Có vật cản (Công thức/Ảnh/Bảng) ở giữa không?
+                    obstacle_found = False
+                    if gap > 0:
+                        search_box = [cx2, min(cy1, ny1), nx1, max(cy2, ny2)]
+                        for prot in protected_regions:
+                            px1, py1, px2, py2 = prot['box']
+                            ix = max(0, min(search_box[2], px2) - max(search_box[0], px1))
+                            iy = max(0, min(search_box[3], py2) - max(search_box[1], py1))
+                            if ix > 0 and iy > 0:
+                                obstacle_found = True
+                                break
+                    
+                    if not obstacle_found:
+                        cx1 = min(cx1, nx1)
+                        cy1 = min(cy1, ny1)
+                        cx2 = max(cx2, nx2)
+                        cy2 = max(cy2, ny2)
+                        skip_indices.add(j)
+                    else:
+                        break
+                else:
+                    break
+
+        merged_texts.append({
+            'label': current['label'],
+            'box': [cx1, cy1, cx2, cy2],
+            'score': current.get('score', 1.0)
+        })
+
+    # Ghép các text đã gom với các đối tượng được bảo vệ (Bảng, chữ trong bảng, công thức, ảnh)
+    return merged_texts + protected_regions
