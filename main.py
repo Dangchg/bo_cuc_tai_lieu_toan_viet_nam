@@ -123,7 +123,7 @@ def process_single_image(img_goc, page_index=1):
     raw_regions = rescue_missing_text(img_remove, raw_regions, page_index)
 
     print("-> Lọc bỏ các box chữ rác nằm trong ảnh/công thức...")
-    cleaned_regions = remove_overlapping_text_lines(raw_regions, overlap_threshold=0.6) 
+    cleaned_regions = remove_overlapping_text_lines(raw_regions, overlap_threshold=0.1) 
     # Mình để 0.4 (40%) vì đôi khi box image không khoanh hết chữ, để ngưỡng thấp sẽ dọn rác sạch hơn.
 
     # GOM DÒNG VĂN BẢN (THÊM HÀM CỦA BẠN VÀO ĐÂY)
@@ -294,7 +294,7 @@ def main_pipeline(input_path):
 
 if __name__ == "__main__":
     # Test với file PDF của bạn
-    test_path = r"data\De thi THCS Cau giay 2024-2025.pdf" 
+    test_path = r"data\De\THCS Cau Giay\De thi THCS Cau giay 2012-2013.pdf" 
     try:
         zip_file = main_pipeline(test_path)
         print(f"Sản phẩm đầu ra sẵn sàng tại: {os.path.abspath(zip_file)}")
