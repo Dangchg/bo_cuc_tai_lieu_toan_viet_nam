@@ -9,7 +9,7 @@ from image_utils import (
     resolve_inline_math,        
     enhance_text_for_vietocr,   
     enhance_math_for_pix2tex,   
-    remove_overlapping_text_lines,remove_watermark,is_valid_image_content,nms_text_lines_by_score
+    remove_overlapping_text_lines,remove_watermark,is_valid_image_content,nms_text_lines_by_score,rescue_missing_text,merge_adjacent_text_lines
 )
 
 from table_handler import assign_lines_to_cells, build_latex_table
@@ -71,7 +71,7 @@ def export_to_latex(content_list, output_filename="output.tex"):
         else:
             # ÉP XUỐNG DÒNG: Nếu phần tử hiện tại HOẶC phần tử trước đó là đối tượng Độc Lập 
             # (Tiêu đề, Bảng, Ảnh minh họa) -> Tuyệt đối không nối dòng, phải tách riêng.
-            independent_labels = ['doc_title', 'paragraph_title', 'table', 'image', 'figure']
+            independent_labels = ['doc_title', 'paragraph_title', 'table', 'image','chart', 'figure']
             
             if label in independent_labels or prev_label in independent_labels:
                 body_content += "\n\n" + text
@@ -109,18 +109,26 @@ def process_single_image(img_goc, page_index=1):
     print(f"--- Đang phân tích Layout trang {page_index} ---")
     # raw_regions lúc này ĐÃ BAO GỒM cả text_line và formula
     raw_regions = get_layout_regions(temp_img_path)
+    print("=> SAU MODEL:", [b['label'] for b in raw_regions if b['label'] in ['image', 'chart']])
     #  HÀM LỌC 
-    MIN_LAYOUT_SCORE = 0.3
+    MIN_LAYOUT_SCORE = 0.01
     raw_regions = [b for b in raw_regions if b.get('score', 1.0) >= MIN_LAYOUT_SCORE]
     print(f"-> Đã lọc bỏ các vùng có độ tin cậy < {MIN_LAYOUT_SCORE}")
 
     print("-> Áp dụng NMS lọc các dòng chữ lồng nhau...")
     raw_regions = nms_text_lines_by_score(raw_regions, overlap_threshold=0.5)
 
+    # GỌI HÀM CỨU HỘ CÓ DEBUG
+    print("-> Đang quét tìm chữ bị sót ở hai bên công thức...")
+    raw_regions = rescue_missing_text(img_remove, raw_regions, page_index)
+
     print("-> Lọc bỏ các box chữ rác nằm trong ảnh/công thức...")
-    cleaned_regions = remove_overlapping_text_lines(raw_regions, overlap_threshold=0.4) 
+    cleaned_regions = remove_overlapping_text_lines(raw_regions, overlap_threshold=0.6) 
     # Mình để 0.4 (40%) vì đôi khi box image không khoanh hết chữ, để ngưỡng thấp sẽ dọn rác sạch hơn.
 
+    # GOM DÒNG VĂN BẢN (THÊM HÀM CỦA BẠN VÀO ĐÂY)
+    print("-> Đang gom các đoạn chữ đứt gãy thành dòng lớn...")
+    cleaned_regions = merge_adjacent_text_lines(cleaned_regions)
 
 
     if os.path.exists(temp_img_path):
@@ -133,6 +141,7 @@ def process_single_image(img_goc, page_index=1):
     # 2. Xử lý hình học: Ghép công thức vào giữa dòng chữ
     print("-> Xử lý Inline Math và Thứ tự đọc...")
     ordered_boxes = resolve_inline_math(cleaned_regions)
+    print("=> SAU INLINE MATH:", [b['label'] for b in ordered_boxes if b['label'] in ['image', 'chart']])
     
     # [DEBUG 2] Ảnh sau khi đã sắp xếp và chẻ dòng
     if DEBUG_MODE:
@@ -192,7 +201,7 @@ def process_single_image(img_goc, page_index=1):
             continue
 
         # --- LUỒNG 1: ẢNH MINH HỌA (IMAGE/FIGURE) ---
-        elif label in ['image', 'figure']:
+        elif label in ['image','chart', 'figure']:
             pad_y = max(15, int((y2 - y1) * 0.05))
             pad_x = max(15, int((x2 - x1) * 0.05))
             c_y1, c_y2 = max(0, y1 - pad_y), min(img_goc.shape[0], y2 + pad_y)
@@ -285,7 +294,7 @@ def main_pipeline(input_path):
 
 if __name__ == "__main__":
     # Test với file PDF của bạn
-    test_path = r"data\TOÁN 4 - PHIẾU 1.pdf" 
+    test_path = r"data\De thi THCS Cau giay 2024-2025.pdf" 
     try:
         zip_file = main_pipeline(test_path)
         print(f"Sản phẩm đầu ra sẵn sàng tại: {os.path.abspath(zip_file)}")
