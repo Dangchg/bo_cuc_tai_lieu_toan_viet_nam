@@ -33,7 +33,7 @@ def assign_lines_to_cells(target_table_box, cell_box_list, all_regions):
             continue
             
         # Các nhãn image, figure hoặc CÁC BẢNG KHÁC thì vẫn giữ lại cho vòng lặp sau
-        if item['label'] in ['table', 'image', 'figure']:
+        if item['label'] in ['table', 'image', 'chart', 'figure']:
             outside_items.append(item)
             continue
             
@@ -61,9 +61,9 @@ def assign_lines_to_cells(target_table_box, cell_box_list, all_regions):
         if best_cell_idx != -1 and max_ioa > 0.3:
             cells_data[best_cell_idx]['contents'].append(item)
             
-    # 4. Sắp xếp lại thứ tự chữ TRONG CÙNG 1 CELL (từ trên xuống dưới, trái sang phải)
+    # 4. Sắp xếp lại thứ tự chữ TRONG CÙNG 1 CELL (Ép sai số trục Y là 15 pixel)
     for i in cells_data:
-        cells_data[i]['contents'].sort(key=lambda x: (x['box'][1], x['box'][0]))
+        cells_data[i]['contents'].sort(key=lambda x: (x['box'][1] // 15, x['box'][0]))
         
     return cells_data, outside_items
 
@@ -102,7 +102,7 @@ def build_latex_table(cells_text_list, cell_box_list):
     # Lấy 95% chiều rộng trang giấy chia đều cho số cột (chừa 5% cho đường kẻ và padding)
     col_fraction = round(0.95 / max_cols, 3)
     
-    # Đổi từ cột 'c' sang cột 'p' (paragraph) để cho phép xuống dòng
+    # Đổi từ cột 'c' sang cột 'p' (paragraph) 
     col_format = f"p{{{col_fraction}\\textwidth}}|" * max_cols
     
     latex_str = "\\begin{center}\n\\begin{tabular}{|" + col_format + "}\n\\hline\n"
